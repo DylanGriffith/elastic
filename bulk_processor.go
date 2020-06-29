@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,7 @@ type BulkProcessorService struct {
 	wantStats            bool          // indicates whether to gather statistics
 	backoff              Backoff       // a custom Backoff to use for errors
 	retryItemStatusCodes []int         // array of status codes for bulk response line items that may be retried
+	headers              http.Header   // custom request-level HTTP headers
 }
 
 // NewBulkProcessorService creates a new BulkProcessorService.
@@ -148,6 +150,21 @@ func (s *BulkProcessorService) RetryItemStatusCodes(retryItemStatusCodes ...int)
 	return s
 }
 
+// Header adds a header to the bulk requests.
+func (s *BulkProcessorService) Header(name string, value string) *BulkProcessorService {
+	if s.headers == nil {
+		s.headers = http.Header{}
+	}
+	s.headers.Add(name, value)
+	return s
+}
+
+// Headers specifies the headers of the bulk requests.
+func (s *BulkProcessorService) Headers(headers http.Header) *BulkProcessorService {
+	s.headers = headers
+	return s
+}
+
 // Do creates a new BulkProcessor and starts it.
 // Consider the BulkProcessor as a running instance that accepts bulk requests
 // and commits them to Elasticsearch, spreading the work across one or more
@@ -181,6 +198,7 @@ func (s *BulkProcessorService) Do(ctx context.Context) (*BulkProcessor, error) {
 		s.flushInterval,
 		s.wantStats,
 		s.backoff,
+		s.headers,
 		retryItemStatusCodes)
 
 	err := p.Start(ctx)
@@ -272,6 +290,8 @@ type BulkProcessor struct {
 	retryItemStatusCodes map[int]struct{}
 	backoff              Backoff
 
+	headers http.Header // custom request-level HTTP headers
+
 	startedMu sync.Mutex // guards the following block
 	started   bool
 
@@ -292,6 +312,7 @@ func newBulkProcessor(
 	flushInterval time.Duration,
 	wantStats bool,
 	backoff Backoff,
+	headers http.Header,
 	retryItemStatusCodes map[int]struct{}) *BulkProcessor {
 	return &BulkProcessor{
 		c:                    client,
@@ -305,6 +326,7 @@ func newBulkProcessor(
 		wantStats:            wantStats,
 		retryItemStatusCodes: retryItemStatusCodes,
 		backoff:              backoff,
+		headers:              headers,
 	}
 }
 
@@ -454,12 +476,15 @@ type bulkWorker struct {
 
 // newBulkWorker creates a new bulkWorker instance.
 func newBulkWorker(p *BulkProcessor, i int) *bulkWorker {
+	service := NewBulkService(p.c).
+		Headers(p.headers)
+
 	return &bulkWorker{
 		p:           p,
 		i:           i,
 		bulkActions: p.bulkActions,
 		bulkSize:    p.bulkSize,
-		service:     NewBulkService(p.c),
+		service:     service,
 		flushC:      make(chan struct{}),
 		flushAckC:   make(chan struct{}),
 	}
